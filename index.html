@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f3f5f6">
+  <meta name="description" content="מקומות ושעות פתיחה במטולה, לכל ימות השבוע.">
+  <title>מתי פתוח במטולה?</title>
+  <link rel="stylesheet" href="static/styles.css">
+  <script src="static/app.js" defer></script>
+</head>
+
+<body>
+  <header class="masthead">
+    <div class="masthead-inner">
+      <a class="brand" href="./" aria-label="מתי פתוח במטולה? לדף הראשי">
+        <svg viewBox="0 0 32 32" aria-hidden="true">
+          <path d="M5 27V12l11-7 11 7v15M10 27v-9h12v9M13 22h6M3 27h26" />
+        </svg>
+        <span>מטולה <strong>פתוחה</strong></span>
+      </a>
+      <span class="masthead-note">המדריך המקומי לשעות פתיחה</span>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="directory" aria-labelledby="directory-title">
+      <div class="section-heading">
+        <div>
+          <h2 id="directory-title">מתי פתוח במטולה?</h2>
+          <p id="results-count" aria-live="polite">טוענים מקומות…</p>
+        </div>
+        <span class="week-note">שעות פתיחה לכל השבוע</span>
+      </div>
+      <div class="toolbar">
+        <div class="search-wrap">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="10.5" cy="10.5" r="6.5" />
+            <path d="m15.5 15.5 4 4" />
+          </svg>
+          <label class="sr-only" for="search">חיפוש לפי שם מקום</label>
+          <input id="search" type="search" placeholder="חיפוש מקום לפי שם" autocomplete="off">
+        </div>
+        <div class="category-filters" role="group" aria-label="סינון לפי סוג מקום">
+          <button class="category-filter is-active" type="button" data-category="all" aria-pressed="true">
+            <span class="filter-icon" aria-hidden="true">⌂</span><span>הכול</span>
+          </button>
+          <button class="category-filter" type="button" data-category="בית קפה" aria-pressed="false">
+            <span class="filter-icon" aria-hidden="true">☕</span><span>בתי קפה</span>
+          </button>
+          <button class="category-filter" type="button" data-category="בר" aria-pressed="false">
+            <span class="filter-icon" aria-hidden="true">🍸</span><span>ברים</span>
+          </button>
+          <button class="category-filter" type="button" data-category="מסעדה" aria-pressed="false">
+            <span class="filter-icon" aria-hidden="true">🍴</span><span>מסעדות</span>
+          </button>
+          <button class="category-filter" type="button" data-category="יד שנייה" aria-pressed="false">
+            <span class="filter-icon" aria-hidden="true">🏷️</span><span>יד שנייה</span>
+          </button>
+        </div>
+        <div class="sort-wrap"><label for="sort">מיון לפי</label><select id="sort">
+            <option value="status">פתוח עכשיו</option>
+            <option value="name">שם המקום</option>
+          </select></div>
+      </div>
+      <p class="data-note">שעות שלא אומתו מופיעות כלא ידועות.</p>
+      <div id="load-error" class="message" role="alert" hidden>לא הצלחנו לטעון את רשימת המקומות. כדאי לרענן את הדף
+        ולנסות שוב.</div>
+      <div id="empty-state" class="message" hidden>לא נמצאו מקומות מתאימים. אפשר לנסות שם אחר או לנקות את החיפוש.</div>
+      <div id="places-list" class="places-list"></div>
+    </section>
+  </main>
+  <footer class="site-footer"><span>מטולה פתוחה</span><span>מקומות ושעות במבט אחד</span></footer>
+
+  <dialog id="place-dialog" aria-labelledby="dialog-title">
+    <div class="dialog-top"><span>פרטי המקום</span><button id="dialog-close" class="close-button" type="button"
+        aria-label="סגירת פרטי המקום"><svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 5l14 14M19 5 5 19" />
+        </svg></button></div>
+    <h2 id="dialog-title"></h2>
+    <p id="dialog-category" class="dialog-category"></p>
+    <p id="dialog-address" class="dialog-address"></p>
+    <p id="dialog-description" hidden></p>
+    <a id="dialog-link" class="dialog-link" target="_blank" rel="noopener noreferrer" hidden>לאתר המקום <span
+        aria-hidden="true">↗</span></a>
+  </dialog>
+</body>
+
+</html>

@@ -1,0 +1,248 @@
+[
+  {
+    "id": "umtalla",
+    "name": "אומטולה",
+    "google-search-name": "אומטולה - בר יין",
+    "google-search-id": "ChIJ817XvGW_HhURz89XBHNm15g",
+    "type": "בר",
+    "address": "הראשונים 17, מטולה",
+    "instagram": "umtalla_wine_bar",
+    "description": null,
+    "hoursUpdatedAt": "2026-11-09T06:20:37Z",
+    "hours": [
+      [],
+      [],
+      [],
+      [
+        {
+          "opens": "19:30",
+          "closes": "00:00"
+        }
+      ],
+      [
+        {
+          "opens": "19:30",
+          "closes": "00:00"
+        }
+      ],
+      [],
+      [
+        {
+          "opens": "19:30",
+          "closes": "00:00"
+        }
+      ]
+    ]
+  },
+  {
+    "id": "cafe-bela",
+    "name": "קפה בלה",
+    "type": "בית קפה",
+    "address": "הראשונים 17, מטולה",
+    "instagram": "cafe_bela_metulla",
+    "description": null,
+    "hoursUpdatedAt": "2026-11-09T06:21:01Z",
+    "hours": [
+      [],
+      [
+        {
+          "opens": "10:00",
+          "closes": "18:00"
+        }
+      ],
+      [
+        {
+          "opens": "10:00",
+          "closes": "18:00"
+        }
+      ],
+      [
+        {
+          "opens": "10:00",
+          "closes": "18:00"
+        }
+      ],
+      [
+        {
+          "opens": "10:00",
+          "closes": "18:00"
+        }
+      ],
+      [
+        {
+          "opens": "10:00",
+          "closes": "16:00"
+        }
+      ],
+      [
+        {
+          "opens": "10:00",
+          "closes": "18:00"
+        }
+      ]
+    ]
+  },
+  {
+    "id": "cafe-goldie",
+    "name": "קפה גולדי",
+    "type": "בית קפה",
+    "address": "החצבים, מטולה",
+    "instagram": "cafe.goldie",
+    "description": null,
+    "hoursUpdatedAt": "2026-11-09T06:21:28Z",
+    "hours": [
+      [],
+      [
+        {
+          "opens": "10:00",
+          "closes": "16:00"
+        }
+      ],
+      [
+        {
+          "opens": "10:00",
+          "closes": "16:00"
+        }
+      ],
+      [
+        {
+          "opens": "10:00",
+          "closes": "16:00"
+        }
+      ],
+      [
+        {
+          "opens": "10:00",
+          "closes": "16:00"
+        }
+      ],
+      [],
+      [
+        {
+          "opens": "10:00",
+          "closes": "14:00"
+        }
+      ]
+    ]
+  },
+  {
+    "id": "metushelach",
+    "name": "מטושלך",
+    "type": "יד שנייה",
+    "address": "הראשונים 17, מטולה",
+    "instagram": null,
+    "description": null,
+    "hoursUpdatedAt": null,
+    "hours": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  {
+    "id": "hasimta",
+    "name": "הסמטה",
+    "google-search-id": "ChIJJR9XeBu_HhURA0uEtxGdP2Y",
+    "type": "מסעדה",
+    "address": "הראשונים 17, מטולה",
+    "instagram": null,
+    "description": null,
+    "hoursUpdatedAt": "2026-11-09T06:21:15Z",
+    "hours": [
+      [],
+      [],
+      [
+        {
+          "opens": "13:00",
+          "closes": "22:00"
+        }
+      ],
+      [],
+      [
+        {
+          "opens": "13:00",
+          "closes": "22:00"
+        }
+      ],
+      [],
+      [
+        {
+          "opens": "13:00",
+          "closes": "22:00"
+        }
+      ]
+    ]
+  },
+  {
+    "id": "beit-shalom",
+    "name": "בית שלום",
+    "google-search-id": "ChIJI2P6Ngi-HhUR0tXvHY6GPTY",
+    "type": "מסעדה",
+    "address": "הראשונים 28, מטולה",
+    "instagram": null,
+    "description": null,
+    "hoursUpdatedAt": null,
+    "hours": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  {
+    "id": "ayuni",
+    "name": "עיוני",
+    "google-search-id": "ChIJIaiRLwi-HhURVyejcdcTqso",
+    "type": "מסעדה",
+    "address": "הראשונים 21, מטולה",
+    "instagram": null,
+    "description": null,
+    "hoursUpdatedAt": "2026-11-09T06:21:06Z",
+    "hours": [
+      [
+        {
+          "opens": "12:00",
+          "closes": "23:00"
+        }
+      ],
+      [
+        {
+          "opens": "12:00",
+          "closes": "23:00"
+        }
+      ],
+      [
+        {
+          "opens": "12:00",
+          "closes": "23:00"
+        }
+      ],
+      [
+        {
+          "opens": "12:00",
+          "closes": "23:00"
+        }
+      ],
+      [
+        {
+          "opens": "12:00",
+          "closes": "23:00"
+        }
+      ],
+      [],
+      [
+        {
+          "opens": "18:00",
+          "closes": "23:00"
+        }
+      ]
+    ]
+  }
+]
