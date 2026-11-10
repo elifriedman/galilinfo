@@ -58,7 +58,7 @@ function getStatus(hours, now = israelTime()) {
 function formatDay(day) {
   if (!validDay(day)) return "לא ידוע";
   if (!day.length) return "סגור";
-  return day.map(period => `${period.opens}–${period.closes}${parseTime(period.closes) <= parseTime(period.opens) ? " למחרת" : ""}`).join(" / ");
+  return day.map(period => `${period.closes}–${period.opens}`).join(" / ");
 }
 
 function formatUpdated(value) {
@@ -110,9 +110,8 @@ if (typeof document !== "undefined") {
       if (index) element.append(document.createTextNode(" / "));
       const range = document.createElement("bdi");
       range.dir = "ltr";
-      range.textContent = `${period.opens}–${period.closes}`;
+      range.textContent = `${period.closes}–${period.opens}`;
       element.append(range);
-      if (parseTime(period.closes) <= parseTime(period.opens)) element.append(document.createTextNode(" למחרת"));
     });
     return element;
   }
@@ -122,15 +121,17 @@ if (typeof document !== "undefined") {
     $("dialog-title").textContent = place.name;
     $("dialog-category").textContent = place.type;
     $("dialog-address").textContent = place.address || "";
-    $("dialog-address").hidden = !place.address;
+    $("dialog-address-row").hidden = !place.address;
     $("dialog-description").textContent = place.description || "";
     $("dialog-description").hidden = !place.description;
     const link = $("dialog-link");
     const handle = typeof place.instagram === "string" && /^[A-Za-z0-9._]+$/.test(place.instagram) ? place.instagram : null;
-    link.hidden = !handle;
+    $("dialog-link-row").hidden = !handle;
+    $("dialog-details").hidden = !place.address && !handle;
     if (handle) {
       link.href = `https://www.instagram.com/${encodeURIComponent(handle)}/`;
-      link.textContent = `@${handle}`;
+      const handleText = $("dialog-link-handle") || link;
+      handleText.textContent = `@${handle}`;
     } else link.removeAttribute("href");
     dialog.showModal();
   }

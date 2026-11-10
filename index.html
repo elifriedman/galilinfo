@@ -74,16 +74,16 @@
   <footer class="site-footer"><span>מטולה פתוחה</span><span>מקומות ושעות במבט אחד</span></footer>
 
   <dialog id="place-dialog" aria-labelledby="dialog-title">
-    <div class="dialog-top"><span>פרטי המקום</span><button id="dialog-close" class="close-button" type="button"
+    <div class="dialog-top"><div class="dialog-identity"><h2 id="dialog-title"></h2>
+      <p id="dialog-category" class="dialog-category"></p></div><button id="dialog-close" class="close-button" type="button"
         aria-label="סגירת פרטי המקום"><svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M5 5l14 14M19 5 5 19" />
         </svg></button></div>
-    <h2 id="dialog-title"></h2>
-    <p id="dialog-category" class="dialog-category"></p>
-    <p id="dialog-address" class="dialog-address"></p>
-    <p id="dialog-description" hidden></p>
-    <a id="dialog-link" class="dialog-link" target="_blank" rel="noopener noreferrer" hidden>לאתר המקום <span
-        aria-hidden="true">↗</span></a>
+    <p id="dialog-description" class="dialog-description" hidden></p>
+    <div id="dialog-details" class="dialog-details">
+      <div id="dialog-address-row" class="dialog-detail" hidden><span class="dialog-detail-label">כתובת</span><p id="dialog-address"></p></div>
+      <div id="dialog-link-row" class="dialog-detail" hidden><span class="dialog-detail-label">אינסטגרם</span><a id="dialog-link" class="dialog-link" dir="ltr" target="_blank" rel="noopener noreferrer"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.5" cy="6.5" r="1" class="instagram-dot"/></svg><bdi id="dialog-link-handle" dir="ltr"></bdi></a></div>
+    </div>
   </dialog>
 </body>
 
