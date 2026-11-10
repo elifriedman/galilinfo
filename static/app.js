@@ -67,7 +67,18 @@ function formatUpdated(value) {
   return Number.isNaN(date.valueOf()) ? "עדכון שעות: לא ידוע" : `עדכון שעות: ${new Intl.DateTimeFormat("he-IL", { timeZone: "Asia/Jerusalem", day: "numeric", month: "numeric", year: "numeric" }).format(date)}`;
 }
 
-if (typeof module !== "undefined" && module.exports) module.exports = { israelTime, parseTime, validDay, getStatus, formatDay, formatUpdated };
+function placeIdFromHash(hash) {
+  const match = hash.match(/^#([a-z0-9]+(?:-[a-z0-9]+)*)$/);
+  return match ? match[1] : null;
+}
+
+function prioritizePlace(places, placeId) {
+  const index = places.findIndex(place => place.id === placeId);
+  if (index > 0) places.unshift(places.splice(index, 1)[0]);
+  return places;
+}
+
+if (typeof module !== "undefined" && module.exports) module.exports = { israelTime, parseTime, validDay, getStatus, formatDay, formatUpdated, placeIdFromHash, prioritizePlace };
 
 if (typeof document !== "undefined") {
   const $ = id => document.getElementById(id);
@@ -77,6 +88,7 @@ if (typeof document !== "undefined") {
   let places = [];
   let lastTrigger = null;
   let activeCategory = "all";
+  let pendingHashRender = false;
 
   const span = (className, text) => {
     const element = document.createElement("span");
@@ -124,6 +136,11 @@ if (typeof document !== "undefined") {
     $("dialog-address-row").hidden = !place.address;
     $("dialog-description").textContent = place.description || "";
     $("dialog-description").hidden = !place.description;
+    const share = $("dialog-share");
+    if (share) {
+      share.hidden = !placeIdFromHash(`#${place.id}`);
+      if (!share.hidden) share.href = `#${place.id}`;
+    }
     const link = $("dialog-link");
     const handle = typeof place.instagram === "string" && /^[A-Za-z0-9._]+$/.test(place.instagram) ? place.instagram : null;
     $("dialog-link-row").hidden = !handle;
@@ -149,6 +166,7 @@ if (typeof document !== "undefined") {
       if (sort.value === "name") return byName(a, b);
       return order[getStatus(a.hours, now).key] - order[getStatus(b.hours, now).key] || byName(a, b);
     });
+    prioritizePlace(visible, placeIdFromHash(location.hash));
     count.textContent = `${visible.length} ${visible.length === 1 ? "מקום" : "מקומות"}`;
     $("empty-state").hidden = visible.length !== 0;
     list.replaceChildren();
@@ -199,7 +217,14 @@ if (typeof document !== "undefined") {
   }));
   $("dialog-close").addEventListener("click", () => dialog.close());
   dialog.addEventListener("click", event => { if (event.target === dialog) dialog.close(); });
-  dialog.addEventListener("close", () => { if (lastTrigger?.isConnected) lastTrigger.focus(); });
+  dialog.addEventListener("close", () => {
+    if (lastTrigger?.isConnected) lastTrigger.focus();
+    if (pendingHashRender) { pendingHashRender = false; render(); }
+  });
+  window.addEventListener("hashchange", () => {
+    if (dialog.open) pendingHashRender = true;
+    else render();
+  });
 
   fetch("https://galilinfo.elifdev.com/data/places.json")
     .then(response => { if (!response.ok) throw new Error("Data unavailable"); return response.json(); })
