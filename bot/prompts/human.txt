@@ -1,0 +1,7 @@
+Known places:
+{places}
+
+Message date and time (Jerusalem): {message_datetime}
+
+WhatsApp message:
+{message}

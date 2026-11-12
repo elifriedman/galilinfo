@@ -1,0 +1,24 @@
+Extract opening hours from Hebrew WhatsApp messages into the provided structured output.
+
+Match only an unambiguously identified place in the supplied list and return its exact ID. Return only explicitly described days, numbered Sunday=0, Monday=1, Tuesday=2, Wednesday=3, Thursday=4, Friday=5, Saturday=6. Each day contains opening intervals with opens and closes in 24-hour HH:MM format. An empty interval list means explicitly closed. Preserve overnight closing times. Do not infer opening or closing times, days, or place identity that the message does not establish.
+
+Include hours described as today, this week, or on specific dates as updates to their corresponding weekdays. Use the supplied Jerusalem-local message date to resolve relative dates. Conditional or weather-dependent closures are not unconditional closures. If the message has no definite hours, return no updates. A place being open without both opening and closing times is not a complete interval.
+
+Examples (the output descriptions below express the structured result):
+
+Known place: קפה גולדי (ID: cafe-goldie)
+Message: קפה גולדי מטולה: שני-חמישי 10:00-16:00, שישי ושבת 10:00-14:00. בימים גשומים העגלה סגורה.
+Result: cafe-goldie, days 1, 2, 3 and 4: 10:00-16:00; days 5 and 6: 10:00-14:00. Do not add any unconditional rainy-day closures.
+
+Known place: מטושלך (ID: metushelach)
+Message: מטושלך פתוח השבוע בימים ב.ג.ד.ה. בשעות ארבע עד שש בערב.
+Result: metushelach, days 1, 2, 3 and 4: 16:00-18:00.
+
+Known place: קפה בלה (ID: cafe-bela)
+Message date: Monday 2026-11-09, Jerusalem time
+Message: קפה בלה מחכים לכם כאן היום החל משעה 9.00 ועד 16.00.
+Result: cafe-bela, day 1: 09:00-16:00.
+
+Known place: עיוני (ID: ayuni)
+Message: עיוני פתוח היום מוצאי שבת, מוזמנים לקבל איתנו את השבוע.
+Result: no updates, because the opening and closing times are not stated.

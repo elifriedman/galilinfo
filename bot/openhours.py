@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 _lock = asyncio.Lock()
-PROMPT_DIR = Path(__file__).parent / "prompts" / "openhours"
+PROMPT_DIR = Path(__file__).parent / "prompts"
 POSITIVE_REACTIONS = {"👍", "✅", "❤️", "❤", "🙌", "👌"}
 WEEKDAYS = ("יום ראשון", "יום שני", "יום שלישי", "יום רביעי", "יום חמישי", "יום שישי", "שבת")
 
