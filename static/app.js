@@ -122,9 +122,18 @@ if (typeof document !== "undefined") {
     }
     day.forEach((period, index) => {
       if (index) element.append(document.createTextNode(" / "));
-      const range = document.createElement("bdi");
-      range.dir = "ltr";
-      range.textContent = `${period.closes}–${period.opens}`;
+      const range = document.createElement("span");
+      range.className = "hour-range";
+      const closing = document.createElement("bdi");
+      closing.dir = "ltr";
+      closing.textContent = period.closes;
+      const separator = document.createElement("span");
+      separator.className = "hour-range-separator";
+      separator.textContent = "–";
+      const opening = document.createElement("bdi");
+      opening.dir = "ltr";
+      opening.textContent = period.opens;
+      range.append(closing, separator, opening);
       element.append(range);
     });
     return element;

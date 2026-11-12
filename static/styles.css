@@ -17,6 +17,12 @@ dialog{width:min(480px,calc(100% - 32px));max-height:calc(100dvh - 32px);overflo
 @media(max-width:350px){.masthead-note{display:none}.page{padding-inline:12px}.place-row{padding-inline:8px}.place-type-icon{width:36px;height:36px}.place-name{font-size:19px}}
 @media(prefers-reduced-motion:no-preference){.place-row,.close-button{transition:background-color 180ms ease-out}dialog[open]{animation:dialog-in 180ms ease-out}@keyframes dialog-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}}
 
+.day-cell { container-type: inline-size; }
+.hour-range { display: inline-flex; direction: rtl; align-items: baseline; justify-content: center; gap: 2px; white-space: nowrap; }
+@container (max-width: 78px) {
+  .hour-range { flex-direction: column-reverse; align-items: center; gap: 0; line-height: 1.1; }
+}
+
 /* Allow long day labels to wrap inside the narrow seven-column grid. */
 .day-hours { display: block; width: 100%; min-width: 0; overflow-wrap: anywhere; }
 .toolbar { display: flex; align-items: center; gap: 16px; }
