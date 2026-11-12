@@ -45,8 +45,6 @@ def _safe_token(value: Any) -> str:
 
 
 def _log_failure(stage: str, event_id: Any, exc: Exception, *, level: int = logging.ERROR) -> None:
-    # Exceptions and provider response bodies can contain messages, phone numbers,
-    # credentials, or request bodies. Log only safe metadata and stack locations.
     response = getattr(exc, "response", None)
     status = getattr(exc, "status_code", None)
     if not isinstance(status, int):
@@ -75,6 +73,7 @@ def _log_failure(stage: str, event_id: Any, exc: Exception, *, level: int = logg
         "Directory event failed event=%s stage=%s error=%s status=%s code=%s detail=%s provider_request_id=%s frames=%s",
         _event_ref(event_id), stage, type(exc).__name__, status,
         _safe_token(getattr(exc, "code", None)), detail, _safe_token(provider_request_id), frames,
+        exc_info=(type(exc), exc, exc.__traceback__),
     )
 
 CAP_ENV = {
