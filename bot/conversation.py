@@ -125,7 +125,7 @@ async def interpret_message(
         raise ValueError("max_tool_calls must be positive")
 
     llm = ChatOpenAI(
-        base_url=os.environ.get("CLASSIFIER_BASE_URL", "https://api.tokenfactory.nebius.com/v1/"),
+        base_url=os.environ.get("CLASSIFIER_BASE_URL"),
         api_key=os.environ.get("CLASSIFIER_API_KEY"),
         model=os.environ.get("CLASSIFIER_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507"),
         temperature=0,
@@ -141,7 +141,7 @@ async def interpret_message(
         for name, model in _OPERATION_MODELS.items()
     ]
     system = (PROMPT_DIR / "conversation_system.txt").read_text(encoding="utf-8")
-    history_limit = max(0, int(os.environ.get("OPENHOURS_MAX_TURNS", "4")) - 1)
+    history_limit = max(0, int(os.environ.get("OPENHOURS_MAX_TURNS", "8")) - 1)
     recent_turns = turns[-history_limit:] if history_limit else []
     history = "\n".join(_render_turn(turn) for turn in recent_turns)
     human = (PROMPT_DIR / "conversation_human.txt").read_text(encoding="utf-8").format(

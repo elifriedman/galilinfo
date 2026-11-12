@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
+import sqlite3
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,6 +29,53 @@ _MODEL_SEMAPHORE_SIZE: int | None = None
 _MODEL_REQUEST_LOOP: asyncio.AbstractEventLoop | None = None
 _LIMIT_MESSAGE = "הגעת למגבלת השימוש של הבוט. לא נשמר שינוי. אפשר לנסות שוב מאוחר יותר."
 _FAILURE_MESSAGE = "לא הצלחתי להכין הצעה בטוחה. לא נשמר שינוי. אפשר לנסח מחדש את הבקשה."
+
+
+def _event_ref(value: Any) -> str:
+    """Correlate logs without exposing the WhatsApp event identifier."""
+    if not isinstance(value, str) or not value:
+        return "unknown"
+    return hashlib.sha256(value.encode()).hexdigest()[:12]
+
+
+def _safe_token(value: Any) -> str:
+    if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,100}", value):
+        return value
+    return "unknown"
+
+
+def _log_failure(stage: str, event_id: Any, exc: Exception, *, level: int = logging.ERROR) -> None:
+    # Exceptions and provider response bodies can contain messages, phone numbers,
+    # credentials, or request bodies. Log only safe metadata and stack locations.
+    response = getattr(exc, "response", None)
+    status = getattr(exc, "status_code", None)
+    if not isinstance(status, int):
+        status = getattr(response, "status_code", None)
+    status = status if isinstance(status, int) else "unknown"
+    provider_request_id = getattr(exc, "request_id", None)
+    if not provider_request_id and response is not None:
+        provider_request_id = response.headers.get("x-request-id")
+    frames = ",".join(
+        f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}"
+        for frame in traceback.extract_tb(exc.__traceback__)
+    ) or "unknown"
+    detail = "unknown"
+    if isinstance(exc, sqlite3.Error):
+        detail = _safe_token(getattr(exc, "sqlite_errorname", None))
+        missing = re.fullmatch(r"no such column: ([A-Za-z_][A-Za-z0-9_]*)", str(exc))
+        if missing and missing.group(1) in {"message_id", "request_id", "group_id", "revision", "status"}:
+            detail += ":missing_column:" + missing.group(1)
+    elif isinstance(exc, LimitConfigurationError):
+        for variable in CAP_ENV.values():
+            if str(exc) == f"{variable} must be a positive integer":
+                detail = variable + ":must_be_positive_integer"
+                break
+    logger.log(
+        level,
+        "Directory event failed event=%s stage=%s error=%s status=%s code=%s detail=%s provider_request_id=%s frames=%s",
+        _event_ref(event_id), stage, type(exc).__name__, status,
+        _safe_token(getattr(exc, "code", None)), detail, _safe_token(provider_request_id), frames,
+    )
 
 CAP_ENV = {
     "turns": "OPENHOURS_MAX_TURNS",
@@ -118,6 +168,9 @@ async def _send(chat_id: str, text: str, reply_message_id: str | None = None) ->
             phone=chat_id, message=text, reply_message_id=reply_message_id,
         ))
         return response.results.message_id if response.results else None
+    except Exception as exc:
+        _log_failure("whatsapp_send", reply_message_id, exc)
+        raise
     finally:
         await client.close()
 
@@ -126,6 +179,9 @@ async def _react(chat_id: str, message_id: str, emoji: str) -> None:
     client = _client()
     try:
         await client.react_to_message(message_id=message_id, phone=chat_id or "", emoji=emoji)
+    except Exception as exc:
+        _log_failure("whatsapp_reaction", message_id, exc)
+        raise
     finally:
         await client.close()
 
@@ -426,8 +482,14 @@ async def handle_openhours_post(message: WebhookMessagePayload, raw_payload: dic
     if not _authorized(message):
         logger.info("Ignoring unauthorized WhatsApp event")
         return
-    path, db_path = _paths()
-    store = ProposalStore(db_path)
+    logger.info("Directory event accepted event=%s kind=%s", _event_ref(message.id),
+                "reaction" if message.reacted_message_id else "message")
+    try:
+        path, db_path = _paths()
+        store = ProposalStore(db_path)
+    except Exception as exc:
+        _log_failure("proposal_store_init", message.id, exc)
+        raise
     limits: dict[str, int] | None = None
 
     if message.reacted_message_id:
@@ -435,18 +497,24 @@ async def handle_openhours_post(message: WebhookMessagePayload, raw_payload: dic
         # must still be valid.
         try:
             _limits()
-        except LimitConfigurationError:
+        except LimitConfigurationError as exc:
+            _log_failure("limits", message.id, exc)
             await _send(message.chat_id or "", _LIMIT_MESSAGE)
             return
-        async with _state_lock:
-            await _handle_reaction(message, store, path)
+        try:
+            async with _state_lock:
+                await _handle_reaction(message, store, path)
+        except Exception as exc:
+            _log_failure("reaction", message.id, exc)
+            raise
         return
     body = message.text or ""
     if not body.strip() or not message.id or not message.timestamp:
         return
     try:
         limits = _limits()
-    except LimitConfigurationError:
+    except LimitConfigurationError as exc:
+        _log_failure("limits", message.id, exc)
         # No model work and no write when any required cap is misconfigured.
         await _send(message.chat_id or "", _LIMIT_MESSAGE, message.id)
         return
@@ -454,6 +522,7 @@ async def handle_openhours_post(message: WebhookMessagePayload, raw_payload: dic
         return
 
     timestamp = message.timestamp.astimezone(timezone.utc)
+    stage = "load_conversation"
     try:
         reply_proposal = store.get_active_proposal(message.chat_id or "", message.replied_to_id) if message.replied_to_id else None
         linked_proposal = store.proposal_for_turn_message(message.chat_id or "", message.replied_to_id) if message.replied_to_id else None
@@ -502,12 +571,16 @@ async def handle_openhours_post(message: WebhookMessagePayload, raw_payload: dic
             _MODEL_SEMAPHORE = asyncio.Semaphore(concurrency)
             _MODEL_SEMAPHORE_SIZE = concurrency
             _MODEL_REQUEST_LOOP = current_loop
+        stage = "model"
+        logger.info("Directory model request event=%s", _event_ref(message.id))
         async with _MODEL_SEMAPHORE:
             result = await interpret_message(
                 text=body, places=places, timestamp=message.timestamp,
                 turns=turns[:-1], active_proposals=active,
                 max_tool_calls=limits["tool_calls"],
             )
+        stage = "process_model_result"
+        logger.info("Directory model response event=%s operations=%d", _event_ref(message.id), len(result.operations))
         if not result.operations:
             reply = result.reply.strip() or _FAILURE_MESSAGE
             sent_id = await _send(message.chat_id or "", reply, message.id)
@@ -575,6 +648,7 @@ async def handle_openhours_post(message: WebhookMessagePayload, raw_payload: dic
                 proposal_id=reply_proposal.get("id") if reply_proposal else None,
             )
             return
+        stage = "prepare_proposal"
         aliases = _rekey_pending_new(previous_prepared, operations, places, reserved_ids)
         async with _state_lock:
             if reply_proposal:
@@ -631,8 +705,8 @@ async def handle_openhours_post(message: WebhookMessagePayload, raw_payload: dic
             if cancel_message_id:
                 try:
                     await _react(message.chat_id or "", cancel_message_id, "❌")
-                except Exception:
-                    logger.warning("Could not mark cancelled proposal", extra={"proposal_id": proposal_id})
+                except Exception as exc:
+                    _log_failure("mark_cancelled_proposal", message.id, exc, level=logging.WARNING)
             reply = "ההצעה בוטלה. לא נשמר שינוי במדריך."
             sent_id = await _send(message.chat_id or "", reply, message.id)
             store.record_assistant_turn(message.chat_id or "", _normalized_phone(message.from_), reply,
@@ -643,32 +717,56 @@ async def handle_openhours_post(message: WebhookMessagePayload, raw_payload: dic
         for stale_id in superseded:
             try:
                 await _react(message.chat_id or "", stale_id, "❌")
-            except Exception:
-                logger.warning("Could not mark superseded proposal message", extra={"proposal_id": proposal_id})
+            except Exception as exc:
+                _log_failure("mark_superseded_proposal", message.id, exc, level=logging.WARNING)
         try:
+            stage = "send_proposal"
             sent_id = await _send(message.chat_id or "", text, message.id)
             store.record_delivery(proposal_id, status="sent" if sent_id else "delivery-unknown", message_id=sent_id)
             if sent_id:
                 store.record_assistant_turn(message.chat_id or "", _normalized_phone(message.from_), text,
                                             request_id=request_id, message_id=sent_id,
                                             proposal_id=proposal_id)
-        except Exception:
+            logger.info("Directory proposal delivery event=%s proposal=%s status=%s", _event_ref(message.id),
+                        proposal_id, "sent" if sent_id else "unknown")
+        except Exception as exc:
             store.record_delivery(proposal_id, status="delivery-unknown", message_id=None)
-            logger.error("Could not send proposal", extra={"proposal_id": proposal_id})
+            _log_failure("send_proposal", message.id, exc)
             await _send(message.chat_id or "", _FAILURE_MESSAGE, message.id)
-    except Exception:
-        logger.error("Directory conversation failed", extra={"event_id": message.id})
+    except Exception as exc:
+        _log_failure(stage, message.id, exc)
         try:
             await _send(message.chat_id or "", _FAILURE_MESSAGE, message.id)
-        except Exception:
-            logger.error("Could not send fixed failure response")
+        except Exception as send_exc:
+            _log_failure("send_failure_response", message.id, send_exc)
 
 
 def is_relevant(event: str, payload: dict[str, Any]) -> bool:
     try:
         message = WebhookMessagePayload.model_validate(payload)
-        return is_openhours_post(message, payload) and not _from_me(message, payload) and _authorized(message)
-    except Exception:
+        if os.environ.get("OPENHOURS_CONVERSATION_ENABLED", "false").lower() != "true":
+            reason = "disabled"
+        elif not os.environ.get("OPENHOURS_GROUP_ID"):
+            reason = "group_not_configured"
+        elif message.chat_id != os.environ.get("OPENHOURS_GROUP_ID"):
+            reason = "different_group"
+        elif not (message.text or message.reacted_message_id):
+            reason = "no_text_or_reaction"
+        elif _from_me(message, payload):
+            reason = "self_authored"
+        else:
+            reason = ""
+        if reason:
+            logger.info("Directory event ignored event=%s reason=%s", _event_ref(message.id), reason)
+            return False
+        if not _authorized(message):
+            configured = os.environ.get("OPENHOURS_AUTHORIZED_PHONE_NUMBER", "")
+            reason = "unauthorized" if re.fullmatch(r"\+[1-9]\d{7,14}", configured) else "invalid_authorized_phone_format"
+            logger.info("Directory event ignored event=%s reason=%s", _event_ref(message.id), reason)
+            return False
+        return True
+    except Exception as exc:
+        _log_failure("validate_event", payload.get("id") if isinstance(payload, dict) else None, exc)
         return False
 
 
