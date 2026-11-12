@@ -10,3 +10,11 @@ dependencies = [
     "requests>=2.34.2",
     "uvicorn>=0.54.0",
 ]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["bot*"]
+namespaces = true
