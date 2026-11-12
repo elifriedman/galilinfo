@@ -1,5 +1,5 @@
-@font-face{font-family:GardenSans;src:url("fonts/NotoSansHebrew-Regular.ttf") format("truetype");font-weight:400;font-display:swap}
-@font-face{font-family:GardenSans;src:url("fonts/NotoSansHebrew-Bold.ttf") format("truetype");font-weight:700 900;font-display:swap}
+@font-face{font-family:GardenSans;font-weight:400;font-display:swap}
+@font-face{font-family:GardenSans;font-weight:700 900;font-display:swap}
 :root{color-scheme:light;--ink:#202b35;--soft:#526473;--pink:#285c84;--ground:#f3f5f6;--panel:#ffffff;--line:#d2dce2;--accent:#285c84;font-family:GardenSans,"Noto Sans Hebrew",sans-serif;font-synthesis:none}
 *{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--ground);font-size:16px;line-height:1.5}h1,h2,p{margin:0}button,input,select{font:inherit}button,input,select,a{outline-offset:4px} :focus-visible{outline:3px solid #245d88}::selection{background:var(--pink);color:#17374e}input{caret-color:var(--pink)}
 .masthead{background:#ffffff;border-bottom:1px solid #d2dce2}.masthead-inner{max-width:1400px;padding:0 48px;margin:auto;min-height:76px;display:flex;align-items:center;justify-content:space-between;gap:24px}.brand{display:flex;align-items:center;gap:10px;color:var(--ink);text-decoration:none;font-size:20px}.brand strong{color:var(--pink)}.brand svg,.intro-mark svg,.search-wrap svg,.close-button svg{fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}.brand svg{width:27px;height:27px}.masthead-note{color:var(--soft);font-size:14px}
