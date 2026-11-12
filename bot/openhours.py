@@ -1,223 +1,676 @@
-"""Propose opening-hour updates and apply them after a group reaction."""
+"""Authorized WhatsApp transport for conversational directory proposals."""
+
+from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import os
 import re
-import sqlite3
-import tempfile
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from typing import Any
 
-from gowa_sdk.webhooks import WebhookMessagePayload
 from gowa_sdk import GoWaClient, SendMessageRequest
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field, field_validator
+from gowa_sdk.webhooks import WebhookMessagePayload
+
+from .conversation import interpret_message
+from .directory import EDITABLE_FIELDS, build_new_place, duplicate_name, load_places, prepare_change, readable_id
+from .proposals import ProposalStore
 
 logger = logging.getLogger(__name__)
-_lock = asyncio.Lock()
-PROMPT_DIR = Path(__file__).parent / "prompts"
-POSITIVE_REACTIONS = {"👍", "✅", "❤️", "❤", "🙌", "👌"}
-WEEKDAYS = ("יום ראשון", "יום שני", "יום שלישי", "יום רביעי", "יום חמישי", "יום שישי", "שבת")
+WEEKDAY_NAMES = ("ראשון", "שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת")
+_state_lock = asyncio.Lock()
+_MODEL_SEMAPHORE: asyncio.Semaphore | None = None
+_MODEL_SEMAPHORE_SIZE: int | None = None
+_MODEL_REQUEST_LOOP: asyncio.AbstractEventLoop | None = None
+_LIMIT_MESSAGE = "הגעת למגבלת השימוש של הבוט. לא נשמר שינוי. אפשר לנסות שוב מאוחר יותר."
+_FAILURE_MESSAGE = "לא הצלחתי להכין הצעה בטוחה. לא נשמר שינוי. אפשר לנסח מחדש את הבקשה."
+
+CAP_ENV = {
+    "turns": "OPENHOURS_MAX_TURNS",
+    "revisions": "OPENHOURS_MAX_REVISIONS",
+    "tool_calls": "OPENHOURS_MAX_TOOL_CALLS",
+    "concurrent_model_requests": "OPENHOURS_MAX_CONCURRENT_MODEL_REQUESTS",
+}
 
 
-class Interval(BaseModel):
-    opens: str
-    closes: str
-
-    @field_validator("opens", "closes")
-    @classmethod
-    def valid_time(cls, value: str) -> str:
-        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
-            raise ValueError("time must be HH:MM")
-        return value
+class LimitConfigurationError(ValueError):
+    pass
 
 
-class DayUpdate(BaseModel):
-    day: int = Field(ge=0, le=6, description="Sunday=0, Monday=1, ..., Saturday=6")
-    intervals: list[Interval] = Field(description="Empty only if explicitly closed")
+class WithdrawalError(ValueError):
+    """A requested withdrawal does not match a change in the active proposal."""
 
 
-class PlaceUpdate(BaseModel):
-    place_id: str = Field(description="An exact ID from the supplied places")
-    days: list[DayUpdate]
+def _limits() -> dict[str, int]:
+    values: dict[str, int] = {}
+    for key, variable in CAP_ENV.items():
+        raw = os.environ.get(variable)
+        try:
+            value = int(raw) if raw is not None else 0
+        except ValueError:
+            value = 0
+        if value <= 0:
+            raise LimitConfigurationError(f"{variable} must be a positive integer")
+        values[key] = value
+    return values
 
 
-class Extraction(BaseModel):
-    updates: list[PlaceUpdate]
+def _normalized_phone(value: str | None) -> str:
+    if not value:
+        return ""
+    phone = value.split("@", 1)[0].split(":", 1)[0]
+    digits = re.sub(r"\D", "", phone)
+    return digits
 
 
-async def extract_hours(text: str, places: list[dict], timestamp: datetime) -> Extraction:
-    llm = ChatOpenAI(
-        base_url=os.environ.get("CLASSIFIER_BASE_URL", "https://api.tokenfactory.nebius.com/v1/"),
-        api_key=os.environ.get("CLASSIFIER_API_KEY"),
-        model=os.environ.get("CLASSIFIER_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507"),
-        temperature=0,
-        timeout=90,
-        max_retries=0,
+def _authorized(message: WebhookMessagePayload) -> bool:
+    configured = os.environ.get("OPENHOURS_AUTHORIZED_PHONE_NUMBER", "")
+    if not re.fullmatch(r"\+[1-9]\d{7,14}", configured):
+        return False
+    expected = _normalized_phone(configured)
+    sender = _normalized_phone(message.from_)
+    return bool(expected and sender and expected == sender)
+
+
+def _from_me(message: WebhookMessagePayload, payload: dict[str, Any] | None = None) -> bool:
+    extra = payload or getattr(message, "model_extra", None) or {}
+    return bool(
+        getattr(message, "is_from_me", False)
+        or extra.get("is_from_me")
+        or extra.get("from_me")
+        or extra.get("isFromMe")
     )
-    known_places = "\n".join(f"- {p['name']} (ID: {p['id']})" for p in places)
-    system_prompt = (PROMPT_DIR / "system.txt").read_text(encoding="utf-8")
-    human_prompt = (PROMPT_DIR / "human.txt").read_text(encoding="utf-8").format(
-        places=known_places,
-        message_datetime=timestamp.astimezone(ZoneInfo("Asia/Jerusalem")).isoformat(),
-        message=text,
-    )
-    return await llm.with_structured_output(Extraction).ainvoke([
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=human_prompt),
-    ])
 
 
-def _load_places(path: Path) -> list[dict]:
-    with path.open(encoding="utf-8") as file:
-        places = json.load(file)
-    if not isinstance(places, list):
-        raise ValueError("places JSON must be an array")
-    ids = set()
-    for place in places:
-        if not isinstance(place, dict) or not isinstance(place.get("id"), str) or not isinstance(place.get("name"), str):
-            raise ValueError("each place must have string id and name")
-        if place["id"] in ids:
-            raise ValueError("place IDs must be unique")
-        ids.add(place["id"])
-        if not isinstance(place.get("hours"), list) or len(place["hours"]) != 7:
-            raise ValueError("each place must have seven hours entries")
-    return places
-
-
-def _write_places(path: Path, places: list[dict]) -> None:
-    # Replace in the same directory so readers never observe a partial JSON file.
-    temp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as file:
-            temp_path = Path(file.name)
-            json.dump(places, file, ensure_ascii=False, indent=2)
-            file.write("\n")
-        os.replace(temp_path, path)
-    finally:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
-
-
-def is_openhours_post(message: WebhookMessagePayload) -> bool:
+def is_openhours_post(message: WebhookMessagePayload, payload: dict[str, Any] | None = None) -> bool:
+    if os.environ.get("OPENHOURS_CONVERSATION_ENABLED", "false").lower() != "true":
+        return False
     group = os.environ.get("OPENHOURS_GROUP_ID")
     return bool(group and message.chat_id == group and (message.text or message.reacted_message_id))
 
 
-@contextmanager
-def _pending_db(path: Path):
-    db_path = os.environ.get("OPENHOURS_PENDING_DB", str(path) + ".pending.sqlite3")
-    conn = sqlite3.connect(db_path)
+def _paths() -> tuple[Path, str]:
+    places = os.environ.get("OPENHOURS_PLACES_PATH")
+    if not places:
+        raise ValueError("OPENHOURS_PLACES_PATH must point to the directory JSON file")
+    path = Path(places)
+    return path, os.environ.get("OPENHOURS_PENDING_DB", str(path) + ".pending.sqlite3")
+
+
+def _client() -> GoWaClient:
+    raw = os.environ.get("WHATSAPP", ":")
+    username, separator, password = raw.partition(":")
+    if not separator or not username or not password:
+        raise ValueError("WHATSAPP must contain the GoWa username and password")
+    return GoWaClient(
+        base_url=os.environ.get("WHATSAPP_BASE_URL", "http://localhost:3001"),
+        username=username,
+        password=password,
+    )
+
+
+async def _send(chat_id: str, text: str, reply_message_id: str | None = None) -> str | None:
+    client = _client()
     try:
-        with conn:
-            conn.execute("""CREATE TABLE IF NOT EXISTS proposals (
-                group_id TEXT NOT NULL, source_id TEXT NOT NULL, reply_id TEXT NOT NULL,
-                timestamp TEXT NOT NULL, extraction TEXT NOT NULL, applied INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (group_id, reply_id), UNIQUE (group_id, source_id)
-            )""")
-            yield conn
+        response = await client.send_message(SendMessageRequest(
+            phone=chat_id, message=text, reply_message_id=reply_message_id,
+        ))
+        return response.results.message_id if response.results else None
     finally:
-        conn.close()
+        await client.close()
 
 
-def _format_proposal(extraction: Extraction, places: list[dict]) -> str:
-    names = {place["id"]: place["name"] for place in places}
-    lines = ["זיהיתי את שעות הפעילות הבאות:"]
-    for update in extraction.updates:
-        lines.append(f"\n*{names[update.place_id]}*")
-        for day in sorted(update.days, key=lambda item: item.day):
-            hours = ", ".join(f"{interval.opens}–{interval.closes}" for interval in day.intervals) or "סגור"
-            lines.append(f"{WEEKDAYS[day.day]}: {hours}")
-    lines.append("\nלאישור ועדכון השעות, הגיבו להודעה הזו ב-👍 (או ✅, ❤️, 🙌, 👌).")
+async def _react(chat_id: str, message_id: str, emoji: str) -> None:
+    client = _client()
+    try:
+        await client.react_to_message(message_id=message_id, phone=chat_id or "", emoji=emoji)
+    finally:
+        await client.close()
+
+
+def _plain(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return {str(k): _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    return value
+
+
+def _format_change(prepared: Any, places: list[dict[str, Any]], note: str | None = None) -> str:
+    data = _plain(prepared)
+    operations = data.get("operations", []) if isinstance(data, dict) else []
+    if not operations:
+        operations = data.get("changes", []) if isinstance(data, dict) else []
+    known = {place["id"]: place for place in places}
+    lines = ["הצעה לעדכון מדריך העסקים (טרם נשמרה):"]
+    if note:
+        lines.extend(["", note])
+    for operation in operations:
+        place = operation.get("place") or operation.get("new_place")
+        place_id = operation.get("place_id") or (place or {}).get("id", "")
+        name = (place or {}).get("name") or operation.get("name") or known.get(place_id, {}).get("name") or place_id
+        lines.extend(["", f"*{name}*"])
+        if place or operation.get("new_place"):
+            lines.append("רשומה חדשה:")
+            lines.append(json.dumps(place or operation["new_place"], ensure_ascii=False, indent=2))
+        patch = operation.get("patch", {})
+        if patch:
+            originals = operation.get("originals", {})
+            for field, after in patch.items():
+                if field == "hours_days":
+                    continue
+                original = originals.get(field, {})
+                old = original.get("value") if original.get("exists") else known.get(place_id, {}).get(field, "לא צוין")
+                lines.append(f"{field}: {old!r} ← {after!r}")
+        hour_days = operation.get("hours_days", patch.get("hours_days", {}))
+        old_hours = operation.get("hours_originals", {})
+        for day, intervals in sorted(hour_days.items(), key=lambda item: int(item[0])):
+            day_index = int(day)
+            hours = "לא ידוע" if intervals is None else (", ".join(f"{item['opens']}–{item['closes']}" for item in intervals) or "סגור")
+            before = old_hours.get(str(day), known.get(place_id, {}).get("hours", [None] * 7)[day_index])
+            old_text = "לא ידוע" if before is None else ("סגור" if before == [] else json.dumps(before, ensure_ascii=False))
+            lines.append(f"יום {WEEKDAY_NAMES[day_index]}: {old_text} ← {hours}")
+    lines.extend(["", "לאישור ההצעה הזו בלבד, הגיבו להודעה ב-👍. תיקון ייצור הצעה חדשה שתדרוש אישור נוסף."])
     return "\n".join(lines)
 
 
-async def _send_proposal(message: WebhookMessagePayload, text: str) -> str:
-    username, password = os.environ.get("WHATSAPP", ":").split(":", 1)
-    client = GoWaClient(base_url=os.environ.get("WHATSAPP_BASE_URL", "http://localhost:3001"), username=username, password=password)
-    try:
-        response = await client.send_message(SendMessageRequest(phone=message.chat_id or "", message=text, reply_message_id=message.id))
-    finally:
-        await client.close()
-    if response.results is None or not response.results.message_id:
-        raise ValueError("GoWa did not return the proposal message ID")
-    return response.results.message_id
+def _format_google(preview: dict[str, Any]) -> str:
+    lines = ["תצוגה מקדימה של שעות Google (טרם נשמרה):"]
+    for result in preview.get("results", []):
+        lines.extend([
+            "", f"*{result.get('display_name') or result['place_id']}*",
+            f"מזהה Google: {result.get('google_place_id') or 'לא צוין'}",
+            f"כתובת: {result.get('address') or 'לא צוין'}",
+        ])
+        hours = result.get("hours") or []
+        for day, value in enumerate(hours):
+            lines.append(f"יום {WEEKDAY_NAMES[day]}: {json.dumps(value, ensure_ascii=False)}")
+    skipped = preview.get("skipped", [])
+    if skipped:
+        lines.extend(["", "לא נמצאו תוצאות:"])
+        lines.extend(f"• {item.get('place_id')}: {item.get('reason')}" for item in skipped)
+    if preview.get("results"):
+        lines.extend(["", "לאישור, הגיבו להצעה המלאה הזו ב-👍."])
+    else:
+        lines.extend(["", "לא נוצרה הצעה לאישור כי לא נמצאו שעות מתאימות."])
+    return "\n".join(lines)
 
 
-def _valid_updates(extraction: Extraction, places: list[dict]) -> Extraction:
-    known = {place["id"] for place in places}
-    return Extraction(updates=[update for update in extraction.updates
-        if update.place_id in known and update.days
-        and len({day.day for day in update.days}) == len(update.days)])
+def _google_note(preview: dict[str, Any]) -> str:
+    lines = ["פרטי התאמת Google:"]
+    for item in preview.get("results", []):
+        lines.append(
+            f"{item.get('display_name') or item['place_id']} (ID מדריך: {item['place_id']}; "
+            f"ID Google: {item.get('google_place_id') or 'לא צוין'}; "
+            f"כתובת: {item.get('address') or 'לא צוין'})"
+        )
+    skipped = preview.get("skipped", [])
+    if skipped:
+        lines.append("עסקים שדולגו:")
+        lines.extend(f"{item.get('place_id')}: {item.get('reason')}" for item in skipped)
+    return "\n".join(lines)
 
 
-async def handle_openhours_post(message: WebhookMessagePayload) -> None:
-    if not is_openhours_post(message):
+def _operation_dict(operation: dict[str, Any], places: list[dict[str, Any]], reserved_ids: list[str] | None = None,
+                    pending_new: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    kind = operation["kind"]
+    if kind == "propose_hours":
+        return {
+            "place_id": operation["place_id"],
+            "hours_days": {str(int(day)): intervals for day, intervals in operation["hours_days"].items()},
+        }
+    if kind == "propose_edit":
+        return {"place_id": operation["place_id"], "patch": operation["patch"]}
+    if kind == "propose_create":
+        fields = operation.get("fields", {})
+        allowed_optional = {"address", "instagram", "description", "google-search-name", "google-search-id"}
+        if set(fields) - allowed_optional:
+            raise ValueError("new place fields include a system-managed or unsupported field")
+        place = next((item for item in (pending_new or []) if item.get("name", "").casefold() == operation["name"].casefold()), None)
+        if place is None and len(pending_new or []) == 1:
+            place = pending_new[0]
+        place = dict(place) if place else build_new_place(operation["name"], operation["type"], places, reserved_ids or ())
+        place["name"] = operation["name"]
+        place["type"] = operation["type"]
+        place.update(fields)
+        return {"new_place": place}
+    raise ValueError(f"unsupported operation kind {kind}")
+
+
+def _combine_revision(previous: dict[str, Any] | None, changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build a complete replacement change set, retaining unchanged proposal edits."""
+    combined: dict[str, dict[str, Any]] = {}
+    for item in (previous or {}).get("operations", []):
+        if item.get("kind") == "new":
+            place = dict(item["place"])
+            combined[place["id"]] = {"new_place": place}
+        else:
+            combined[item["place_id"]] = {
+                "place_id": item["place_id"],
+                "patch": dict(item.get("patch", {})),
+            }
+    for change in changes:
+        if "new_place" in change:
+            place = dict(change["new_place"])
+            combined[place["id"]] = {"new_place": place}
+            continue
+        place_id = change["place_id"]
+        current = combined.get(place_id)
+        if current and "new_place" in current:
+            place = current["new_place"]
+            for field, value in change.get("patch", {}).items():
+                if field == "hours_days":
+                    for day, schedule in value.items():
+                        place["hours"][int(day)] = schedule
+                else:
+                    place[field] = value
+            for day, schedule in change.get("hours_days", {}).items():
+                place["hours"][int(day)] = schedule
+            continue
+        target = current or {"place_id": place_id, "patch": {}}
+        patch = target.setdefault("patch", {})
+        for field, value in change.get("patch", {}).items():
+            if field == "hours_days":
+                days = patch.setdefault("hours_days", {})
+                days.update(value)
+            else:
+                patch[field] = value
+        days = patch.setdefault("hours_days", {}) if change.get("hours_days") else None
+        if days is not None:
+            days.update(change["hours_days"])
+        combined[place_id] = target
+    return list(combined.values())
+
+
+def _rekey_pending_new(previous: dict[str, Any] | None, changes: list[dict[str, Any]],
+                       places: list[dict[str, Any]], reserved_ids: list[str]) -> dict[str, str]:
+    old_new = {
+        item["place"]["id"]: item["place"]
+        for item in (previous or {}).get("operations", [])
+        if item.get("kind") == "new"
+    }
+    used = {place["id"] for place in places} | set(reserved_ids)
+    aliases: dict[str, str] = {}
+    for item in changes:
+        place = item.get("new_place")
+        if not place:
+            continue
+        old = old_new.get(place["id"])
+        if old and old.get("name") != place.get("name"):
+            used.discard(place["id"])
+            old_id = place["id"]
+            place["id"] = readable_id(place["name"], used)
+            used.add(place["id"])
+            aliases[old_id] = place["id"]
+    return aliases
+
+
+def _apply_withdrawals(previous: dict[str, Any] | None, operations: list[dict[str, Any]],
+                       withdrawals: list[dict[str, Any]], places: list[dict[str, Any]],
+                       proposed_operations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not withdrawals:
+        return operations
+    if not previous:
+        raise WithdrawalError("there is no active proposal to correct")
+    if any(item["target"] == "proposal" for item in withdrawals):
+        if len(withdrawals) != 1:
+            raise WithdrawalError("whole-proposal cancellation cannot be combined with item withdrawals")
+        return []
+    proposed_by_place: dict[str, dict[str, Any]] = {}
+    for operation in proposed_operations:
+        if operation.get("kind") == "withdraw_proposed_change":
+            continue
+        if "new_place" in operation:
+            proposed_by_place[operation["new_place"]["id"]] = operation
+        elif operation.get("place_id"):
+            proposed_by_place[operation["place_id"]] = operation
+        elif operation.get("kind") == "propose_create":
+            pending_new = [item["place"] for item in previous.get("operations", []) if item.get("kind") == "new"]
+            match = next((item for item in pending_new if item.get("name", "").casefold() == operation["name"].casefold()), None)
+            if match is None and len(pending_new) == 1:
+                match = pending_new[0]
+            if match:
+                proposed_by_place[match["id"]] = {"patch": {
+                    "name": operation["name"], "type": operation["type"], **operation.get("fields", {}),
+                }}
+    active_ids = {
+        item.get("place_id") or item.get("place", {}).get("id")
+        for item in previous.get("operations", [])
+    }
+    for withdrawal in withdrawals:
+        if withdrawal["target"] == "proposal":
+            continue
+        place_id = withdrawal["place_id"]
+        if place_id not in active_ids:
+            raise WithdrawalError("withdrawal target is not in the active proposal")
+        operation = next((item for item in operations
+                          if item.get("place_id") == place_id
+                          or item.get("new_place", {}).get("id") == place_id), None)
+        if operation is None:
+            raise WithdrawalError("withdrawal target is no longer in the proposal")
+        target = withdrawal["target"]
+        if target == "business":
+            operations.remove(operation)
+            continue
+        current_change = proposed_by_place.get(place_id)
+        if target == "field":
+            field = withdrawal["field"]
+            if field not in EDITABLE_FIELDS:
+                raise WithdrawalError("field cannot be withdrawn")
+            if current_change and field in current_change.get("patch", {}):
+                raise WithdrawalError("field has a conflicting change in this correction")
+            if "new_place" in operation:
+                if field in {"name", "type"}:
+                    raise WithdrawalError("a new listing name or type cannot be withdrawn by field")
+                default = build_new_place(operation["new_place"]["name"], operation["new_place"]["type"], places)
+                if operation["new_place"].get(field) == default.get(field):
+                    raise WithdrawalError("field has no proposed change")
+                operation["new_place"][field] = default.get(field)
+            else:
+                patch = operation.get("patch", {})
+                if field not in patch:
+                    raise WithdrawalError("field has no proposed change")
+                del patch[field]
+                if not patch:
+                    operations.remove(operation)
+            continue
+        day = str(withdrawal["weekday"])
+        proposed_days = {
+            **(current_change or {}).get("hours_days", {}),
+            **(current_change or {}).get("patch", {}).get("hours_days", {}),
+        }
+        if day in proposed_days or int(day) in proposed_days:
+            raise WithdrawalError("weekday has a conflicting change in this correction")
+        if "new_place" in operation:
+            hours = operation["new_place"].get("hours", [None] * 7)
+            if hours[int(day)] is None:
+                raise WithdrawalError("weekday has no proposed change")
+            hours[int(day)] = None
+        else:
+            patch = operation.get("patch", {})
+            days = patch.get("hours_days", {})
+            if day not in days and int(day) not in days:
+                raise WithdrawalError("weekday has no proposed change")
+            days.pop(day, None)
+            days.pop(int(day), None)
+            if not days:
+                patch.pop("hours_days", None)
+            if not patch:
+                operations.remove(operation)
+    return operations
+
+
+async def _handle_reaction(message: WebhookMessagePayload, store: ProposalStore, path: Path) -> None:
+    if message.reaction != "👍" or not message.reacted_message_id:
         return
-    path_string = os.environ.get("OPENHOURS_PLACES_PATH")
-    if not path_string:
-        raise ValueError("OPENHOURS_PLACES_PATH must point to an existing places JSON file")
-    if getattr(message, "is_from_me", False):
+    result = store.approve(message.chat_id or "", message.reacted_message_id, str(path))
+    if asyncio.iscoroutine(result):
+        result = await result
+    status = result.get("status") if isinstance(result, dict) else result
+    if status == "conflict":
+        await _send(message.chat_id or "", "הנתונים השתנו מאז הכנת ההצעה. לא נשמר שינוי; יש לבדוק את המדריך ולהכין הצעה חדשה.")
+    elif status not in {"committed", "approved", "applied", True}:
+        await _send(message.chat_id or "", "ההצעה כבר אינה פעילה או שאינה עדכנית. לא בוצע שינוי.")
+    else:
+        await _send(message.chat_id or "", "האישור התקבל והשינוי נשמר.")
+
+
+async def handle_openhours_post(message: WebhookMessagePayload, raw_payload: dict[str, Any] | None = None) -> None:
+    if not is_openhours_post(message, raw_payload) or _from_me(message, raw_payload):
         return
-    path = Path(path_string)
+    # Authorization is required for both ordinary messages and reactions.
+    if not _authorized(message):
+        logger.info("Ignoring unauthorized WhatsApp event")
+        return
+    path, db_path = _paths()
+    store = ProposalStore(db_path)
+    limits: dict[str, int] | None = None
+
     if message.reacted_message_id:
-        if message.reaction not in POSITIVE_REACTIONS:
+        # Approval does not invoke the model, but bounded-operation settings
+        # must still be valid.
+        try:
+            _limits()
+        except LimitConfigurationError:
+            await _send(message.chat_id or "", _LIMIT_MESSAGE)
             return
-        async with _lock:
-            with _pending_db(path) as conn:
-                row = conn.execute("SELECT timestamp, extraction FROM proposals WHERE group_id = ? AND reply_id = ? AND applied = 0", (message.chat_id, message.reacted_message_id)).fetchone()
-                if row is None:
-                    return
-                timestamp = datetime.fromisoformat(row[0])
-                extraction = Extraction.model_validate_json(row[1])
-                _apply_updates(path, extraction, timestamp)
-                conn.execute("UPDATE proposals SET applied = 1 WHERE group_id = ? AND reply_id = ?", (message.chat_id, message.reacted_message_id))
+        async with _state_lock:
+            await _handle_reaction(message, store, path)
         return
-    if not message.id or message.timestamp is None or message.timestamp.utcoffset() is None:
-        logger.warning("Skipping opening-hours message without an ID or timezone-aware timestamp")
+    body = message.text or ""
+    if not body.strip() or not message.id or not message.timestamp:
         return
-    places = _load_places(path)
-    extraction = _valid_updates(await extract_hours(message.text or "", places, message.timestamp), places)
-    if not extraction.updates:
+    try:
+        limits = _limits()
+    except LimitConfigurationError:
+        # No model work and no write when any required cap is misconfigured.
+        await _send(message.chat_id or "", _LIMIT_MESSAGE, message.id)
         return
+    if message.timestamp.utcoffset() is None:
+        return
+
     timestamp = message.timestamp.astimezone(timezone.utc)
-    async with _lock:
-        with _pending_db(path) as conn:
-            existing = conn.execute("SELECT 1 FROM proposals WHERE group_id = ? AND source_id = ?", (message.chat_id, message.id)).fetchone()
-            if existing:
+    try:
+        reply_proposal = store.get_active_proposal(message.chat_id or "", message.replied_to_id) if message.replied_to_id else None
+        linked_proposal = store.proposal_for_turn_message(message.chat_id or "", message.replied_to_id) if message.replied_to_id else None
+        if linked_proposal and linked_proposal.get("status") != "pending":
+            await _send(message.chat_id or "", "ההצעה שאליה הגבת כבר אינה פעילה. לא נוצר שינוי.", message.id)
+            return
+        if not reply_proposal and linked_proposal and linked_proposal.get("status") == "pending":
+            reply_proposal = linked_proposal
+        if message.replied_to_id and not reply_proposal:
+            any_proposal = store.proposal_for_message(message.chat_id or "", message.replied_to_id)
+            if any_proposal:
+                await _send(message.chat_id or "", "ההצעה שאליה הגבת כבר אינה פעילה. לא נוצר שינוי.", message.id)
                 return
-            reply_id = await _send_proposal(message, _format_proposal(extraction, places))
-            conn.execute("INSERT INTO proposals (group_id, source_id, reply_id, timestamp, extraction) VALUES (?, ?, ?, ?, ?)", (message.chat_id, message.id, reply_id, timestamp.isoformat(), extraction.model_dump_json()))
+        request_id = (reply_proposal.get("request_id") if isinstance(reply_proposal, dict) else None)
+        if not request_id and message.replied_to_id:
+            request_id = store.request_for_message(message.chat_id or "", message.replied_to_id)
+        request_id = request_id or message.id
+        if not reply_proposal and request_id != message.id:
+            active_for_request = [
+                proposal for proposal in store.active_proposals_for(message.chat_id or "")
+                if proposal["request_id"] == request_id
+            ]
+            if active_for_request:
+                reply_proposal = active_for_request[-1]
+            elif store.revision_count(request_id):
+                await _send(message.chat_id or "", "ההצעה שאליה הגבת כבר אינה פעילה. לא נוצר שינוי.", message.id)
+                return
+        async with _state_lock:
+            turns = store.record_user_turn(
+                message.chat_id or "", _normalized_phone(message.from_), message.id,
+                body, timestamp, limits["turns"], request_id=request_id,
+            )
+            request_turns = store.conversation_turns(
+                message.chat_id or "", _normalized_phone(message.from_),
+                limits["turns"] + 1, request_id=request_id,
+            )
+            if sum(turn.get("role") == "user" for turn in request_turns) > limits["turns"]:
+                await _send(message.chat_id or "", _LIMIT_MESSAGE, message.id)
+                return
+            places = load_places(str(path))
+            active = [reply_proposal] if reply_proposal else []
+        global _MODEL_SEMAPHORE, _MODEL_SEMAPHORE_SIZE, _MODEL_REQUEST_LOOP
+        concurrency = limits["concurrent_model_requests"]
+        current_loop = asyncio.get_running_loop()
+        if _MODEL_SEMAPHORE is None or _MODEL_SEMAPHORE_SIZE != concurrency or _MODEL_REQUEST_LOOP is not current_loop:
+            _MODEL_SEMAPHORE = asyncio.Semaphore(concurrency)
+            _MODEL_SEMAPHORE_SIZE = concurrency
+            _MODEL_REQUEST_LOOP = current_loop
+        async with _MODEL_SEMAPHORE:
+            result = await interpret_message(
+                text=body, places=places, timestamp=message.timestamp,
+                turns=turns[:-1], active_proposals=active,
+                max_tool_calls=limits["tool_calls"],
+            )
+        if not result.operations:
+            reply = result.reply.strip() or _FAILURE_MESSAGE
+            sent_id = await _send(message.chat_id or "", reply, message.id)
+            store.record_assistant_turn(message.chat_id or "", _normalized_phone(message.from_), reply,
+                                        request_id=request_id, message_id=sent_id,
+                                        proposal_id=reply_proposal.get("id") if reply_proposal else None)
+            return
+        if len(result.operations) > limits["tool_calls"]:
+            await _send(message.chat_id or "", _LIMIT_MESSAGE, message.id)
+            return
+
+        operations: list[dict[str, Any]] = []
+        withdrawals: list[dict[str, Any]] = []
+        google_note: str | None = None
+        google_preview_data: dict[str, Any] | None = None
+        previous_prepared = reply_proposal.get("prepared") if isinstance(reply_proposal, dict) else None
+        pending_new = [
+            op["place"] for op in (previous_prepared or {}).get("operations", [])
+            if op.get("kind") == "new"
+        ]
+        active_proposals = store.active_proposals_for(message.chat_id or "")
+        reserved_ids = [business_id for proposal in active_proposals for business_id in proposal["business_ids"]]
+        if any(item["kind"] == "withdraw_proposed_change" for item in result.operations) and any(item["kind"] == "preview_google_hours" for item in result.operations):
+            clarification = "צריך לבקש תצוגת Google או לבטל שינוי קיים בנפרד. ההצעה הנוכחית נשארת פעילה."
+            sent_id = await _send(message.chat_id or "", clarification, message.id)
+            store.record_assistant_turn(message.chat_id or "", _normalized_phone(message.from_), clarification,
+                                        request_id=request_id, message_id=sent_id,
+                                        proposal_id=reply_proposal.get("id") if reply_proposal else None)
+            return
+        for operation in result.operations:
+            if operation["kind"] == "preview_google_hours":
+                from .google_preview import preview_hours
+                google_preview_data = preview_hours(
+                    places,
+                    place_id=operation.get("place_id"),
+                    google_place_id=operation.get("google_place_id"),
+                    all_places=bool(operation.get("all_places")),
+                )
+                for item in google_preview_data.get("results", []):
+                    operations.append({"place_id": item["place_id"], "hours_days": {str(i): v for i, v in enumerate(item["hours"])}})
+                google_note = _google_note(google_preview_data)
+            elif operation["kind"] == "withdraw_proposed_change":
+                withdrawals.append(operation)
+            else:
+                prepared_operation = _operation_dict(operation, places, reserved_ids, pending_new)
+                operations.append(prepared_operation)
+                if "new_place" in prepared_operation:
+                    reserved_ids.append(prepared_operation["new_place"]["id"])
+        if not operations and not withdrawals:
+            reply = _format_google(google_preview_data) if google_preview_data is not None else (result.reply.strip() or _FAILURE_MESSAGE)
+            sent_id = await _send(message.chat_id or "", reply, message.id)
+            store.record_assistant_turn(message.chat_id or "", _normalized_phone(message.from_), reply,
+                                        request_id=request_id, message_id=sent_id)
+            return
+
+        operations = _combine_revision(previous_prepared, operations)
+        try:
+            operations = _apply_withdrawals(previous_prepared, operations, withdrawals, places, result.operations)
+        except WithdrawalError:
+            clarification = "איזה שינוי בהצעה לבטל? ציינו את השדה, היום או העסק המדויקים. ההצעה הנוכחית נשארת פעילה."
+            sent_id = await _send(message.chat_id or "", clarification, message.id)
+            store.record_assistant_turn(
+                message.chat_id or "", _normalized_phone(message.from_), clarification,
+                request_id=request_id, message_id=sent_id,
+                proposal_id=reply_proposal.get("id") if reply_proposal else None,
+            )
+            return
+        aliases = _rekey_pending_new(previous_prepared, operations, places, reserved_ids)
+        async with _state_lock:
+            if reply_proposal:
+                still_active = any(
+                    proposal["id"] == reply_proposal["id"]
+                    for proposal in store.active_proposals_for(message.chat_id or "")
+                )
+                if not still_active:
+                    await _send(message.chat_id or "", "ההצעה שאליה הגבת כבר אינה פעילה. לא נוצר שינוי.", message.id)
+                    return
+            if operations and store.revision_count(request_id) >= limits["revisions"]:
+                await _send(message.chat_id or "", _LIMIT_MESSAGE, message.id)
+                return
+            if not operations:
+                cancelled = store.cancel_proposal(message.chat_id or "", reply_proposal["message_id"])
+                if not cancelled or cancelled.get("status") != "cancelled":
+                    await _send(message.chat_id or "", "ההצעה כבר אינה פעילה. לא נוצר שינוי.", message.id)
+                    return
+                cancel_message_id = cancelled.get("message_id")
+                proposal_id = reply_proposal["id"]
+                prepared = None
+            else:
+                current_places = load_places(str(path))
+                for operation in operations:
+                    new_place = operation.get("new_place")
+                    if not new_place:
+                        continue
+                    duplicate = duplicate_name(current_places, new_place["name"])
+                    if duplicate:
+                        clarification = (
+                            f"כבר קיים במדריך העסק *{duplicate['name']}* (מזהה {duplicate['id']}). "
+                            "האם התכוונת לעסק הקיים הזה? לא נוצרה הצעה להוספה. "
+                            "אם כן, כתבו את השינוי המבוקש לעסק הקיים."
+                        )
+                        sent_id = await _send(message.chat_id or "", clarification, message.id)
+                        store.record_assistant_turn(
+                            message.chat_id or "", _normalized_phone(message.from_), clarification,
+                            request_id=request_id, message_id=sent_id,
+                            proposal_id=reply_proposal.get("id") if reply_proposal else None,
+                        )
+                        return
+                prepared = prepare_change(current_places, operations)
+                prepared_json = _plain(prepared)
+                if google_preview_data and isinstance(prepared_json, dict):
+                    prepared_json["google_preview"] = google_preview_data
+                text = _format_change(prepared, current_places, google_note)
+                current_ids = [operation.get("place_id") or operation["new_place"]["id"] for operation in operations]
+                business_ids = list(dict.fromkeys(current_ids + list(aliases)))
+                proposal_id, superseded = store.create_proposal(
+                    message.chat_id or "", request_id, prepared_json,
+                    business_ids, text, source_message_id=message.id,
+                )
+        if not operations:
+            if cancel_message_id:
+                try:
+                    await _react(message.chat_id or "", cancel_message_id, "❌")
+                except Exception:
+                    logger.warning("Could not mark cancelled proposal", extra={"proposal_id": proposal_id})
+            reply = "ההצעה בוטלה. לא נשמר שינוי במדריך."
+            sent_id = await _send(message.chat_id or "", reply, message.id)
+            store.record_assistant_turn(message.chat_id or "", _normalized_phone(message.from_), reply,
+                                        request_id=request_id, message_id=sent_id)
+            return
+        # State changes happen before best-effort X reactions, so old messages
+        # are no longer approvable even if WhatsApp rejects a reaction.
+        for stale_id in superseded:
+            try:
+                await _react(message.chat_id or "", stale_id, "❌")
+            except Exception:
+                logger.warning("Could not mark superseded proposal message", extra={"proposal_id": proposal_id})
+        try:
+            sent_id = await _send(message.chat_id or "", text, message.id)
+            store.record_delivery(proposal_id, status="sent" if sent_id else "delivery-unknown", message_id=sent_id)
+            if sent_id:
+                store.record_assistant_turn(message.chat_id or "", _normalized_phone(message.from_), text,
+                                            request_id=request_id, message_id=sent_id,
+                                            proposal_id=proposal_id)
+        except Exception:
+            store.record_delivery(proposal_id, status="delivery-unknown", message_id=None)
+            logger.error("Could not send proposal", extra={"proposal_id": proposal_id})
+            await _send(message.chat_id or "", _FAILURE_MESSAGE, message.id)
+    except Exception:
+        logger.error("Directory conversation failed", extra={"event_id": message.id})
+        try:
+            await _send(message.chat_id or "", _FAILURE_MESSAGE, message.id)
+        except Exception:
+            logger.error("Could not send fixed failure response")
 
 
-def _apply_updates(path: Path, extraction: Extraction, timestamp: datetime) -> None:
-    places = _load_places(path)
-    by_id = {place["id"]: place for place in places}
-    changed = False
-    for update in _valid_updates(extraction, places).updates:
-        place = by_id[update.place_id]
-        previous = place.get("hoursUpdatedAt")
-        if previous:
-            previous_time = datetime.fromisoformat(previous.replace("Z", "+00:00"))
-            if previous_time.utcoffset() is None:
-                raise ValueError("hoursUpdatedAt must have a timezone")
-            if timestamp <= previous_time:
-                continue
-        for day in update.days:
-            place["hours"][day.day] = [interval.model_dump() for interval in day.intervals]
-        place["hoursUpdatedAt"] = timestamp.isoformat().replace("+00:00", "Z")
-        changed = True
-    if changed:
-        _write_places(path, places)
-
-def is_relevant(event: str, payload: dict) -> bool:
-    return is_openhours_post(WebhookMessagePayload.model_validate(payload))
+def is_relevant(event: str, payload: dict[str, Any]) -> bool:
+    try:
+        message = WebhookMessagePayload.model_validate(payload)
+        return is_openhours_post(message, payload) and not _from_me(message, payload) and _authorized(message)
+    except Exception:
+        return False
 
 
-async def handle(event: str, payload: dict) -> None:
-    await handle_openhours_post(WebhookMessagePayload.model_validate(payload))
+async def handle(event: str, payload: dict[str, Any]) -> None:
+    await handle_openhours_post(WebhookMessagePayload.model_validate(payload), payload)
